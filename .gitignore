@@ -1,2 +1,4 @@
 .venv/*
 .ipynb_checkpoints/zksnark-checkpoint.ipynb
+proof.py
+truc.py

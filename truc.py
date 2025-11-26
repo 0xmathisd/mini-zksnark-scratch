@@ -1,168 +1,129 @@
-import math
 import random
+import sympy
 
-
-p = 2**127 - 1      # Mersenne
+# ------------------------------
+# Field
+# ------------------------------
+p = 2**127 - 1
 F = lambda x: x % p
 
-'''
-witness: x
-output: x^2 = 25
+# Fake bilinear group
+g = 9
+def Gexp(x):
+    return pow(g, x % p, p)
 
-We should proof that we know x as x^2 = 25
-'''
+def pairing_exp(a, b):
+    return (a * b) % p
 
-
-# I. Arithmetization (R1CS Rank 1 Constraint System)
-# witness: x; vector = [1, x, x^2]
-# R1CS build : <A_i, w> * <B_i, w> = <C_i, w>
-
-# Constraint 1: x*x = x^2
-# Constraint 1: x^2 = 25
-
+# ------------------------------
+# R1CS: x^2 = 25
+# ------------------------------
+# Constraints: (1) x^2 - 25 = 0
+# Using variables: w0 = 1 (constant), w1 = x, w2 = x^2
 A = [
-    [0, 1, 0],
-    [0, 0, 1]
+    [0, 0, 1],  # A1: x
 ]
 B = [
-    [0, 1, 0],
-    [1, 0, 0]
+    [1, 0, 0],  # B1: x
 ]
 C = [
-    [0, 0, 1],
-    [0, 0, 0]
+    [0, 0, 0],  # C1: x^2
 ]
+K = [25]        # constant term
 
-K = [0, 25]
-
-N_CONSTRAINTS = 2
+N_CONSTRAINTS = 1
 N_VARS = 3
 
-print("R1CS ")
-print("- 2 constraints")
-print("- 3 vars (1, x, x^2) -> vector")
-print("A:", A)
-print("B:", B)
-print("C:", C)
-print("K:", K)
-
-
-def check_r1cs(x, nb_constraint=2, nb_var=3):
-    w = [1, F(x), F(x*x)]
-
-    for i in range(nb_constraint):
-        A_dot = sum(A[i][j] * w[j] for j in range(nb_var))
-        B_dot = sum(B[i][j] * w[j] for j in range(nb_var))
-        C_dot = sum(C[i][j] * w[j] for j in range(nb_var)) + K[i]
-
-        print(f"Constraint {i+1}:  {A_dot} * {B_dot} =? {C_dot}")
-
-        if A_dot * B_dot != C_dot:
-            print("R1CS invalid")
-            return False
-    
-    print("R1CS valid")
-    return True
-
-check_r1cs(4, N_CONSTRAINTS, N_VARS)
-print("-----")
-check_r1cs(5, N_CONSTRAINTS, N_VARS)
-print("-----")
-check_r1cs(7, N_CONSTRAINTS, N_VARS)
-
-
-# II. Constraints to polynomial ( R1CS -> QAP Quadratic Arithmetic Program) 
-# Transform linear constraints to a unique polynomial, verifiable with an single secret point
-
+# ------------------------------
+# Lagrange basis
+# ------------------------------
 def lagrange_basis(i, n):
-    def poly(t): #closure func
-        num = 1
-        den = 1
-        for j in range(1, n+1):
-            if j != i:
-                num = F(num * (t-j))
-                den = F(den * (i-j))
-        return F(num * pow(den, -1, p))
-    return poly
+    X = sympy.symbols('X')
+    basis = 1
+    for j in range(1, n+1):
+        if j != i:
+            basis *= (X - j) / (i - j)
+    return sympy.simplify(basis)
 
-L = [lagrange_basis(i, N_CONSTRAINTS) for i in range(1, N_CONSTRAINTS+1)]
-
-print("Constructed basic Lagrange polynomials.")
+L = [lagrange_basis(i+1, N_CONSTRAINTS) for i in range(N_CONSTRAINTS)]
 
 def poly_from_R1CS_vector(vec):
-    """Build a polynomial (N_CONSTRAINTS-1) from L_i."""
-    def poly(t):
-        acc = 0
-        for i in range(N_CONSTRAINTS):
-            acc = F(acc + vec[i] * L[i](t))
-        return acc
-    return poly
+    X = sympy.symbols('X')
+    poly = sum(vec[i] * L[i] for i in range(N_CONSTRAINTS))
+    return sympy.simplify(poly)
 
 A_poly = [poly_from_R1CS_vector([A[i][j] for i in range(N_CONSTRAINTS)]) for j in range(N_VARS)]
 B_poly = [poly_from_R1CS_vector([B[i][j] for i in range(N_CONSTRAINTS)]) for j in range(N_VARS)]
 C_poly = [poly_from_R1CS_vector([C[i][j] for i in range(N_CONSTRAINTS)]) for j in range(N_VARS)]
 K_poly = poly_from_R1CS_vector(K)
 
-print("Polynomials A(t), B(t), C(t), K(t) generated.")
-
-
-# III. Parameters setup
-
+# ------------------------------
+# Public evaluation points
+# ------------------------------
 tau = random.randint(1, p-1)
+Z_poly = (sympy.symbols('X') - 1)*(sympy.symbols('X') - 2)  # roots at constraints
 
-print("tau =", tau)
+# ------------------------------
+# Compute H(X) properly
+# ------------------------------
+X = sympy.symbols('X')
+Q_poly = sum(A_poly[j]*B_poly[j] for j in range(N_VARS)) - sum(C_poly[j] for j in range(N_VARS)) - K_poly
+H_poly = sympy.simplify(Q_poly / Z_poly)  # division polynomiale
 
-tau_powers = [pow(tau, i, p) for i in range(10)]
-print(tau_powers)
-
-
-# IV. Proof gen
-
-def gen_proof(x):
-    # Witness:
+# ------------------------------
+# Prover
+# ------------------------------
+def prove(x):
     w = [1, F(x), F(x*x)]
 
-    def eval_poly_set(poly_set):
-        return sum( poly_set[i](tau) * w[i] for i in range(3) ) % p
+    def eval_poly(poly_list):
+        return F(sum(F(poly_list[j].subs(X, tau)) * w[j] for j in range(N_VARS)))
 
-    At = eval_poly_set(A_poly)
-    Bt = eval_poly_set(B_poly)
-    Ct = eval_poly_set(C_poly)
-    Kt = K_poly(tau)
-
-    # Q(t) = A(t)B(t) - C(t) - K(t)
-    Qt = F(At * Bt - Ct - Kt)
-
-    # Z(t) = (t-1)(t-2)
-    Zt = F((tau-1)*(tau-2))
-
-    Ht = F(Qt * pow(Zt, -1, p))
-
-    return (At, Bt, Ht)
-
-secret_x = 5  # for 5^2 = 25
-proof = gen_proof(secret_x)
-
-print("Proof generated :", proof)
+    At = F(int(eval_poly(A_poly)))
+    Bt = F(int(eval_poly(B_poly)))
+    Ct = F(int(eval_poly(C_poly)))
+    Kt = F(int(K_poly.subs(X, tau)))
+    Ht = F(int(H_poly.subs(X, tau)))
+    Zt = F(int(Z_poly.subs(X, tau)))
 
 
-# V. Verification
-def verify_proof(proof, x):
-    At, Bt, Ht = proof
-    w = [1, F(x), F(x*x)]
+    # commitments
+    piA = Gexp(At)
+    piB = Gexp(Bt)
+    piC = Gexp(Ht)
 
-    Ct = sum(C_poly[j](tau) * w[j] for j in range(3)) % p
-    Kt = K_poly(tau)
-    Zt = F((tau - 1)*(tau - 2))
+    public_input = F(Ct + Kt)
 
-    LHS = F(At * Bt - Ct - Kt)
-    RHS = F(Ht * Zt)
+    return {
+        "piA": piA, "Aexp": At,
+        "piB": piB, "Bexp": Bt,
+        "piC": piC, "Hexp": Ht,
+        "public": public_input,
+        "Zexp": Zt
+    }
 
-    print("LHS =", LHS)
-    print("RHS =", RHS)
+# ------------------------------
+# Verifier
+# ------------------------------
+def verify(proof):
+    lhs = pairing_exp(proof["Aexp"], proof["Bexp"])
+    rhs = F(proof["Hexp"] * proof["Zexp"] + proof["public"])
 
-    return LHS == RHS
+    print("LHS =", lhs)
+    print("RHS =", rhs)
+    return lhs == rhs
+
+# ------------------------------
+# Test
+# ------------------------------
+print("Testing correct x = 5")
+proof = prove(5)
+print(proof)
+print("Valid proof ?", verify(proof))
+
+print("\nTesting wrong x = 9")
+proof = prove(9)
+print(proof)
+print("Valid proof ?", verify(proof))
 
 
-is_valid = verify_proof(proof, secret_x)
-print("Proof valid?", is_valid)
